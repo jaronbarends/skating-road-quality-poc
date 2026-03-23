@@ -602,23 +602,6 @@
         </button>
       </div>
 
-      <button class="btn-icon" title="Export data" onclick="exportData()">
-        ⬇
-      </button>
-      <button
-        class="btn-icon"
-        title="Import data"
-        onclick="document.getElementById('import-file').click()"
-      >
-        ⬆
-      </button>
-      <input
-        type="file"
-        id="import-file"
-        accept=".json"
-        style="display: none"
-        onchange="importData(event)"
-      />
       <button
         class="btn-icon"
         title="Center on my location"
@@ -776,7 +759,7 @@
 
           const line = L.polyline(seg.points, {
             color: info.color,
-            weight: info.weight,
+            weight: seg.id === activeSegmentId ? 10 : info.weight,
             opacity: 0.85,
             lineCap: "round",
             lineJoin: "round",
@@ -857,13 +840,23 @@
       }
 
       function selectSegment(id) {
+        // Reset previous selection weight
+        if (activeSegmentId && layerMap[activeSegmentId]) {
+          const prevInfo = ratingInfo(segments.find((s) => s.id === activeSegmentId)?.rating);
+          if (prevInfo) layerMap[activeSegmentId].setStyle({ weight: prevInfo.weight });
+        }
+
         activeSegmentId = id;
         const seg = segments.find((s) => s.id === id);
         if (!seg) return;
 
+        // Thicken selected segment
+        if (layerMap[id]) {
+          layerMap[id].setStyle({ weight: 10 });
+        }
+
         // Pan to center of segment
-        const latlngs = seg.points;
-        const bounds = L.latLngBounds(latlngs);
+        const bounds = L.latLngBounds(seg.points);
         map.fitBounds(bounds, { padding: [60, 60], maxZoom: 17 });
 
         // Open popup
@@ -902,6 +895,7 @@
       // ─── Edit flow ─────────────────────────────────────────────────
       function startEditSession() {
         drawingPoints = [];
+        routedCoords = [];
         selectedRating = null;
         document.getElementById("edit-panel").classList.add("visible");
         document.getElementById("drawing-indicator").classList.add("visible");
@@ -938,15 +932,21 @@
         document.getElementById("drawing-indicator").classList.add("visible");
       }
 
-      function onMapClick(e) {
+      // routedCoords holds the full road-snapped coordinate list built up across all segments
+      let routedCoords = [];
+      let isRouting = false;
+
+      async function onMapClick(e) {
         if (mode !== "edit") return;
         if (document.getElementById("edit-step2").style.display !== "none")
           return;
+        if (isRouting) return; // ignore clicks while a request is in flight
 
         const pt = [e.latlng.lat, e.latlng.lng];
+        const prev = drawingPoints[drawingPoints.length - 1];
         drawingPoints.push(pt);
 
-        // Dot marker
+        // Waypoint dot marker
         const m = L.circleMarker(pt, {
           radius: 5,
           color: "#7efff5",
@@ -956,20 +956,68 @@
         }).addTo(map);
         tempMarkers.push(m);
 
-        // Update temp polyline
-        if (tempPolyline) map.removeLayer(tempPolyline);
-        if (drawingPoints.length > 1) {
-          tempPolyline = L.polyline(drawingPoints, {
+        if (prev) {
+          // Route from previous waypoint to this one via OSRM
+          setRoutingBusy(true);
+          try {
+            const coords = await fetchOSRMRoute(prev, pt);
+            // Append new coords (skip first point — it overlaps with end of previous segment)
+            const toAppend =
+              routedCoords.length === 0 ? coords : coords.slice(1);
+            routedCoords = routedCoords.concat(toAppend);
+          } catch (err) {
+            console.warn(
+              "OSRM routing failed, falling back to straight line:",
+              err,
+            );
+            // Fallback: straight line between the two points
+            if (routedCoords.length === 0) routedCoords.push(prev);
+            routedCoords.push(pt);
+          } finally {
+            setRoutingBusy(false);
+          }
+
+          // Redraw preview polyline with routed coords
+          if (tempPolyline) map.removeLayer(tempPolyline);
+          tempPolyline = L.polyline(routedCoords, {
             color: "#7efff5",
-            weight: 3,
-            opacity: 0.6,
-            dashArray: "6 4",
+            weight: 4,
+            opacity: 0.75,
+            dashArray: "8 4",
           }).addTo(map);
+        } else {
+          // First point — just seed routedCoords so the next segment has a start
+          routedCoords = [pt];
         }
 
         document.getElementById("btn-next-step").disabled =
-          drawingPoints.length < 2;
+          drawingPoints.length < 2 || isRouting;
         updateWaypointDots();
+      }
+
+      async function fetchOSRMRoute(from, to) {
+        // OSRM expects lon,lat order
+        const url = `https://routing.openstreetmap.de/routed-bike/route/v1/driving/${from[1]},${from[0]};${to[1]},${to[0]}?overview=full&geometries=geojson`;
+        const res = await fetch(url);
+        if (!res.ok) throw new Error(`OSRM HTTP ${res.status}`);
+        const data = await res.json();
+        if (data.code !== "Ok" || !data.routes.length)
+          throw new Error("No route found");
+        // GeoJSON coordinates are [lon, lat] — convert to [lat, lon] for Leaflet
+        return data.routes[0].geometry.coordinates.map(([lon, lat]) => [
+          lat,
+          lon,
+        ]);
+      }
+
+      function setRoutingBusy(busy) {
+        isRouting = busy;
+        const indicator = document.getElementById("drawing-indicator");
+        indicator.textContent = busy
+          ? "⏳ Snapping to road…"
+          : "🛼 Click to place waypoints — min 2 required";
+        document.getElementById("btn-next-step").disabled =
+          busy || drawingPoints.length < 2;
       }
 
       function updateWaypointDots() {
@@ -983,6 +1031,7 @@
 
       function clearDrawing() {
         drawingPoints = [];
+        routedCoords = [];
         tempMarkers.forEach((m) => map.removeLayer(m));
         tempMarkers = [];
         if (tempPolyline) {
@@ -1019,13 +1068,13 @@
 
       // ─── Save ──────────────────────────────────────────────────────
       function saveSegment() {
-        if (!selectedRating || drawingPoints.length < 2) return;
+        if (!selectedRating || routedCoords.length < 2) return;
 
         const seg = {
           id: crypto.randomUUID(),
           name: document.getElementById("seg-name-input").value.trim(),
           rating: selectedRating,
-          points: drawingPoints.slice(),
+          points: routedCoords.slice(), // road-snapped coordinates
           created: Date.now(),
         };
 
@@ -1069,49 +1118,6 @@
         } catch {
           return [];
         }
-      }
-
-      // ─── Export / Import ───────────────────────────────────────────
-      function exportData() {
-        const blob = new Blob(
-          [JSON.stringify({ version: 1, segments }, null, 2)],
-          { type: "application/json" },
-        );
-        const a = document.createElement("a");
-        a.href = URL.createObjectURL(blob);
-        a.download = `skatemap-${new Date().toISOString().slice(0, 10)}.json`;
-        a.click();
-      }
-
-      function importData(e) {
-        const file = e.target.files[0];
-        if (!file) return;
-        const reader = new FileReader();
-        reader.onload = (ev) => {
-          try {
-            const data = JSON.parse(ev.target.result);
-            const imported = data.segments || data;
-            if (!Array.isArray(imported)) throw new Error();
-            const count = imported.length;
-            if (
-              confirm(
-                `Import ${count} segment(s)? Existing data will be merged.`,
-              )
-            ) {
-              // Merge by id
-              const ids = new Set(segments.map((s) => s.id));
-              imported.forEach((s) => {
-                if (!ids.has(s.id)) segments.push(s);
-              });
-              saveSegments();
-              renderAllSegments();
-            }
-          } catch {
-            alert("Invalid file format.");
-          }
-        };
-        reader.readAsText(file);
-        e.target.value = "";
       }
 
       // ─── Init ──────────────────────────────────────────────────────
