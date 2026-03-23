@@ -721,6 +721,8 @@
       let layerMap = {};
       let filterSet = new Set([1, 2, 3, 4, 5]);
       let map; // assigned once Leaflet is ready
+      let locationMarker = null;
+      let locationWatcher = null;
 
       // ─── Leaflet dynamic loader ─────────────────────────────────────
       (function loadLeaflet() {
@@ -842,8 +844,11 @@
       function selectSegment(id) {
         // Reset previous selection weight
         if (activeSegmentId && layerMap[activeSegmentId]) {
-          const prevInfo = ratingInfo(segments.find((s) => s.id === activeSegmentId)?.rating);
-          if (prevInfo) layerMap[activeSegmentId].setStyle({ weight: prevInfo.weight });
+          const prevInfo = ratingInfo(
+            segments.find((s) => s.id === activeSegmentId)?.rating,
+          );
+          if (prevInfo)
+            layerMap[activeSegmentId].setStyle({ weight: prevInfo.weight });
         }
 
         activeSegmentId = id;
@@ -1071,7 +1076,11 @@
         if (!selectedRating || routedCoords.length < 2) return;
 
         const seg = {
-          id: crypto.randomUUID(),
+          // id: crypto.randomUUID(), // commented out because it requires https or localhost
+          id: "xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx".replace(/[xy]/g, (c) => {
+            const r = (Math.random() * 16) | 0;
+            return (c === "x" ? r : (r & 0x3) | 0x8).toString(16);
+          }),
           name: document.getElementById("seg-name-input").value.trim(),
           rating: selectedRating,
           points: routedCoords.slice(), // road-snapped coordinates
@@ -1098,13 +1107,39 @@
       }
 
       // ─── Location ──────────────────────────────────────────────────
-      function centerOnMe() {
-        navigator.geolocation.getCurrentPosition(
+      function startLocationWatch(onError) {
+        if (locationWatcher !== null) {
+          if (locationMarker) map.setView(locationMarker.getLatLng(), 16);
+          return;
+        }
+        let firstFix = true;
+        locationWatcher = navigator.geolocation.watchPosition(
           (pos) => {
-            map.setView([pos.coords.latitude, pos.coords.longitude], 16);
+            const latlng = [pos.coords.latitude, pos.coords.longitude];
+            if (!locationMarker) {
+              locationMarker = L.circleMarker(latlng, {
+                radius: 8,
+                color: '#fff',
+                weight: 2,
+                fillColor: '#3b82f6',
+                fillOpacity: 1,
+                zIndexOffset: 1000,
+              }).addTo(map);
+            } else {
+              locationMarker.setLatLng(latlng);
+            }
+            if (firstFix) {
+              map.setView(latlng, 14);
+              firstFix = false;
+            }
           },
-          () => alert("Could not get location."),
+          onError,
+          { enableHighAccuracy: true },
         );
+      }
+
+      function centerOnMe() {
+        startLocationWatch((err) => alert(`Could not get location: ${err.message} (code ${err.code})`));
       }
 
       // ─── Persist ───────────────────────────────────────────────────
@@ -1123,12 +1158,7 @@
       // ─── Init ──────────────────────────────────────────────────────
       function init() {
         renderAllSegments();
-        navigator.geolocation.getCurrentPosition(
-          (pos) => {
-            map.setView([pos.coords.latitude, pos.coords.longitude], 14);
-          },
-          () => {},
-        );
+        startLocationWatch(() => {});
       }
     </script>
   </body>
