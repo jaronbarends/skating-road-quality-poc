@@ -666,7 +666,7 @@
           >
             Next →
           </button>
-          <button class="btn-secondary" onclick="cancelEdit()">Cancel</button>
+          <button class="btn-secondary" onclick="clearDrawing()">Cancel</button>
         </div>
       </div>
 
@@ -1119,9 +1119,9 @@
             if (!locationMarker) {
               locationMarker = L.circleMarker(latlng, {
                 radius: 8,
-                color: '#fff',
+                color: "#fff",
                 weight: 2,
-                fillColor: '#3b82f6',
+                fillColor: "#3b82f6",
                 fillOpacity: 1,
                 zIndexOffset: 1000,
               }).addTo(map);
@@ -1139,7 +1139,9 @@
       }
 
       function centerOnMe() {
-        startLocationWatch((err) => alert(`Could not get location: ${err.message} (code ${err.code})`));
+        startLocationWatch((err) =>
+          alert(`Could not get location: ${err.message} (code ${err.code})`),
+        );
       }
 
       // ─── Persist ───────────────────────────────────────────────────
