@@ -723,6 +723,7 @@
       let map; // assigned once Leaflet is ready
       let locationMarker = null;
       let locationWatcher = null;
+      let segmentHandles = {};
 
       // ─── Leaflet dynamic loader ─────────────────────────────────────
       (function loadLeaflet() {
@@ -892,8 +893,10 @@
 
         if (m === "edit") {
           startEditSession();
+          showSegmentHandles();
         } else {
           cancelEdit();
+          hideSegmentHandles();
         }
       }
 
@@ -1091,7 +1094,60 @@
         saveSegments();
         clearDrawing();
         renderAllSegments();
+        hideSegmentHandles();
+        showSegmentHandles();
         startEditSession(); // ready for next segment
+      }
+
+      // ─── Segment handles (edit mode) ───────────────────────────────
+      function showSegmentHandles() {
+        const handleIcon = L.divIcon({
+          className: '',
+          html: '<div style="width:12px;height:12px;background:#1e2229;border:2px solid #7efff5;border-radius:50%;cursor:grab;box-sizing:border-box"></div>',
+          iconSize: [12, 12],
+          iconAnchor: [6, 6],
+        });
+        segments.forEach((seg) => {
+          const handles = { startMarker: null, endMarker: null, debounceTimer: null };
+          handles.startMarker = L.marker(seg.points[0], { draggable: true, icon: handleIcon }).addTo(map);
+          handles.endMarker = L.marker(seg.points[seg.points.length - 1], { draggable: true, icon: handleIcon }).addTo(map);
+
+          [handles.startMarker, handles.endMarker].forEach((marker) => {
+            marker.on('drag', () => {
+              clearTimeout(handles.debounceTimer);
+              handles.debounceTimer = setTimeout(() => rerouteSegment(seg.id), 300);
+            });
+          });
+
+          segmentHandles[seg.id] = handles;
+        });
+      }
+
+      function hideSegmentHandles() {
+        Object.values(segmentHandles).forEach(({ startMarker, endMarker, debounceTimer }) => {
+          clearTimeout(debounceTimer);
+          map.removeLayer(startMarker);
+          map.removeLayer(endMarker);
+        });
+        segmentHandles = {};
+      }
+
+      async function rerouteSegment(id) {
+        const seg = segments.find((s) => s.id === id);
+        const handles = segmentHandles[id];
+        if (!seg || !handles) return;
+
+        const from = [handles.startMarker.getLatLng().lat, handles.startMarker.getLatLng().lng];
+        const to = [handles.endMarker.getLatLng().lat, handles.endMarker.getLatLng().lng];
+
+        try {
+          seg.points = await fetchOSRMRoute(from, to);
+        } catch {
+          seg.points = [from, to];
+        }
+
+        saveSegments();
+        if (layerMap[id]) layerMap[id].setLatLngs(seg.points);
       }
 
       // ─── Delete ────────────────────────────────────────────────────
@@ -1102,7 +1158,7 @@
         if (activeSegmentId === id) activeSegmentId = null;
         saveSegments();
         renderAllSegments();
-        // close popup if open
+        if (mode === 'edit') { hideSegmentHandles(); showSegmentHandles(); }
         map.closePopup();
       }
 
